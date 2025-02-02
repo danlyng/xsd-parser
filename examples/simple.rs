@@ -5,14 +5,16 @@ use std::path::PathBuf;
 
 use anyhow::Error;
 use clap::Parser;
+use inflector::Inflector;
 use tracing_subscriber::{fmt, EnvFilter};
+
 use xsd_parser::{
     config::{
         ContentMode, Generate, GenerateFlags, InterpreterFlags, OptimizerFlags, ParserFlags,
         Resolver, Schema,
     },
     exec_generator, exec_interpreter, exec_optimizer, exec_parser,
-    types::{IdentType, Type},
+    types::{IdentType, Type, Types},
     Config,
 };
 
@@ -49,6 +51,7 @@ fn main() -> Result<(), Error> {
     config.generator.flags =
         GenerateFlags::all() - GenerateFlags::WITH_NAMESPACE_TRAIT - GenerateFlags::QUICK_XML;
     config.generator.content_mode = ContentMode::Enum;
+    config.generator.derive = Some(vec!["Debug".into()]);
 
     if let Some(out_dir) = args
         .enable_debug_output
@@ -63,35 +66,7 @@ fn main() -> Result<(), Error> {
     let schemas = exec_parser(config.parser)?;
     let mut types = exec_interpreter(config.interpreter, &schemas)?;
 
-    for type_ in types.values_mut() {
-        match type_ {
-            Type::Enumeration(ti) => {
-                for var in &mut *ti.variants {
-                    match var.ident.name.as_str() {
-                        Some("+") => var.display_name = Some("Plus".into()),
-                        Some("-") => var.display_name = Some("Minus".into()),
-                        Some(s) if s.starts_with(char::is_numeric) => {
-                            var.display_name = Some(format!("_{s}"));
-                        }
-                        _ => (),
-                    }
-                }
-            }
-            Type::Union(ti) => {
-                for var in &mut *ti.types {
-                    match var.type_.name.as_str() {
-                        Some("+") => var.display_name = Some("Plus".into()),
-                        Some("-") => var.display_name = Some("Minus".into()),
-                        Some(s) if s.starts_with(char::is_numeric) => {
-                            var.display_name = Some(format!("_{s}"));
-                        }
-                        _ => (),
-                    }
-                }
-            }
-            _ => (),
-        }
-    }
+    exec_custom_optimizations(&mut types);
 
     let types_to_generate = types
         .keys()
@@ -121,6 +96,46 @@ fn main() -> Result<(), Error> {
     write(&args.output, code)?;
 
     Ok(())
+}
+fn exec_custom_optimizations(types: &mut Types) {
+    for type_ in types.values_mut() {
+        match type_ {
+            Type::Enumeration(ti) => {
+                for var in &mut *ti.variants {
+                    if let Some(name) = var.ident.name.as_str().and_then(prepare_name) {
+                        var.display_name = Some(name);
+                    }
+                }
+            }
+            Type::Union(ti) => {
+                for var in &mut *ti.types {
+                    if let Some(name) = var.type_.name.as_str().and_then(prepare_name) {
+                        var.display_name = Some(name);
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+fn prepare_name(s: &str) -> Option<String> {
+    match s {
+        "+" => Some(format!("Plus")),
+        "-" => Some(format!("Minus")),
+        s if s.to_ascii_lowercase().starts_with("utc") => Some(
+            s.replace("-", "_Minus_")
+                .replace("+", "_Plus_")
+                .to_pascal_case(),
+        ),
+        s if s.starts_with("-") || s.starts_with("+") => Some(
+            s.replace("-", "Minus")
+                .replace("+", "Plus")
+                .to_pascal_case(),
+        ),
+        s if s.starts_with(char::is_numeric) => Some(format!("_{}", s.to_pascal_case())),
+        _ => None,
+    }
 }
 
 /// Simple command line tool to generate code out of any XML schema that is
