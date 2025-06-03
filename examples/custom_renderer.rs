@@ -32,17 +32,23 @@ use quote::{format_ident, quote, ToTokens};
 use smallvec::{smallvec, SmallVec};
 use tracing_subscriber::{fmt, EnvFilter};
 
-use xsd_parser::generator::DynTypeTraits;
 use xsd_parser::{
     config::{GeneratorFlags, SerdeSupport, TypedefMode},
     generator::{
         renderer::Renderer, ComplexType, ComplexTypeAttribute, ComplexTypeContent,
-        ComplexTypeElement, ComplexTypeEnum, ComplexTypeStruct, Context, CustomType, DynamicType,
-        EnumerationType, EnumerationTypeVariant, Occurs, ReferenceType, TypeData, UnionType,
-        UnionTypeVariant,
+        ComplexTypeElement, ComplexTypeEnum, ComplexTypeStruct, Context, CustomType, DynTypeTraits,
+        DynamicType, EnumerationType, EnumerationTypeVariant, Occurs, ReferenceType, TypeData,
+        UnionType, UnionTypeVariant,
     },
     parser::resolver::FileResolver,
-    schema::xs::Use,
+    schema::{
+        xs::{
+            Annotation, AttributeGroupTypeContent, ComplexBaseTypeContent, ElementTypeContent,
+            GroupTypeContent, SchemaContent, SimpleBaseTypeContent, Use,
+        },
+        Schemas,
+    },
+    types::{Ident, IdentType},
     Generator, Interpreter, Optimizer, Parser,
 };
 
@@ -106,7 +112,7 @@ fn main() -> Result<(), Error> {
     // Setup the generator and generate the code for named types only
     let module = Generator::new(&types)
         .flags(GeneratorFlags::all())
-        .with_renderer(CustomRenderer)
+        .with_renderer(CustomRenderer::new(schemas))
         .into_fixed()
         .generate_named_types()?
         .into_module();
@@ -139,10 +145,17 @@ struct Args {
 }
 
 #[derive(Debug)]
-pub struct CustomRenderer;
+pub struct CustomRenderer {
+    schemas: Schemas,
+}
 
 impl Renderer for CustomRenderer {
     fn render_type(&mut self, ctx: &mut Context<'_, '_>, ty: &TypeData<'_>) {
+        let ident = ctx.ident();
+        let annotation = self.find_annotation(ident);
+
+        dbg!(ident, annotation); // Do something with the annotation
+
         match ty {
             TypeData::BuildIn(_) => (),
             TypeData::Custom(ty) => self.render_custom(ty, ctx),
@@ -156,6 +169,58 @@ impl Renderer for CustomRenderer {
 }
 
 impl CustomRenderer {
+    fn new(schemas: Schemas) -> Self {
+        Self { schemas }
+    }
+
+    fn find_annotation(&self, ident: &Ident) -> Option<&Annotation> {
+        let ns = ident.ns.as_ref()?;
+        let name = ident.name.as_named_str()?;
+        let ns_info = self.schemas.get_namespace_info(ns)?;
+
+        macro_rules! find_annotation {
+            ($x:expr, $ty:ident::$var:ident) => {
+                $x.content
+                    .iter()
+                    .find_map(|x| if let $ty::$var(x) = x { Some(x) } else { None })
+            };
+        }
+
+        for id in &ns_info.schemas {
+            let Some(schema) = self.schemas.get_schema(id) else {
+                continue;
+            };
+
+            for c in &schema.content {
+                match (ident.type_, c) {
+                    (IdentType::Element, SchemaContent::Element(x)) if matches!(&x.name, Some(n) if n == name) =>
+                    {
+                        return find_annotation!(x, ElementTypeContent::Annotation);
+                    }
+                    (IdentType::Type, SchemaContent::SimpleType(x)) if matches!(&x.name, Some(n) if n == name) =>
+                    {
+                        return find_annotation!(x, SimpleBaseTypeContent::Annotation);
+                    }
+                    (IdentType::Type, SchemaContent::ComplexType(x)) if matches!(&x.name, Some(n) if n == name) =>
+                    {
+                        return find_annotation!(x, ComplexBaseTypeContent::Annotation);
+                    }
+                    (IdentType::Group, SchemaContent::Group(x)) if matches!(&x.name, Some(n) if n == name) =>
+                    {
+                        return find_annotation!(x, GroupTypeContent::Annotation);
+                    }
+                    (IdentType::AttributeGroup, SchemaContent::AttributeGroup(x)) if matches!(&x.name, Some(n) if n == name) =>
+                    {
+                        return find_annotation!(x, AttributeGroupTypeContent::Annotation);
+                    }
+                    (_, _) => (),
+                }
+            }
+        }
+
+        None
+    }
+
     /* Custom */
 
     fn render_custom(&self, ty: &CustomType<'_>, ctx: &mut Context<'_, '_>) {
